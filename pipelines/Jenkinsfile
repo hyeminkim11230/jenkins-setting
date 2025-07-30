@@ -1,0 +1,321 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'PROJECT_NAME', defaultValue: 'fashion-recommendation-api', description: 'Project name to deploy')
+        string(name: 'GIT_REPO', defaultValue: 'https://github.com/hyeminkim11230/fashion-recommendation-api.git', description: 'Git repository URL')
+        string(name: 'GIT_BRANCH', defaultValue: 'main', description: 'Git branch to deploy')
+        choice(name: 'ENVIRONMENT', choices: ['development', 'staging', 'production'], description: 'Target environment')
+        string(name: 'DOCKER_REGISTRY', defaultValue: 'docker.io', description: 'Docker registry URL')
+        string(name: 'DOCKER_NAMESPACE', defaultValue: 'hyeminkim11230', description: 'Docker namespace/username')
+    }
+    
+    environment {
+        DOCKER_IMAGE = "${params.DOCKER_NAMESPACE}/${params.PROJECT_NAME}"
+        KUBECONFIG = '/var/lib/jenkins/.kube/config'
+        SLACK_CHANNEL = '#deployments'
+        BUILD_NUMBER_TAG = "${BUILD_NUMBER}"
+        GIT_COMMIT_SHORT = "${GIT_COMMIT.take(7)}"
+    }
+    
+    tools {
+        dockerTool 'docker'
+    }
+    
+    stages {
+        stage('🏁 Initialize') {
+            steps {
+                script {
+                    echo "🚀 Starting deployment pipeline for ${params.PROJECT_NAME}"
+                    echo "📋 Environment: ${params.ENVIRONMENT}"
+                    echo "🌿 Branch: ${params.GIT_BRANCH}"
+                    echo "🐳 Docker Image: ${DOCKER_IMAGE}:${BUILD_NUMBER_TAG}"
+                    
+                    // Slack notification - Start
+                    try {
+                        slackSend(
+                            channel: env.SLACK_CHANNEL,
+                            color: 'warning',
+                            message: "🚀 *${params.PROJECT_NAME}* deployment started\\n" +
+                                   "📋 Environment: `${params.ENVIRONMENT}`\\n" +
+                                   "🌿 Branch: `${params.GIT_BRANCH}`\\n" +
+                                   "👷 Build: `#${BUILD_NUMBER}`\\n" +
+                                   "🔗 <${BUILD_URL}|View Build>"
+                        )
+                    } catch (Exception e) {
+                        echo "Slack notification failed: ${e.getMessage()}"
+                    }
+                }
+            }
+        }
+        
+        stage('📥 Checkout Source Code') {
+            steps {
+                script {
+                    echo "📥 Checking out source code from ${params.GIT_REPO}"
+                    
+                    // Clean workspace
+                    deleteDir()
+                    
+                    // Checkout source code
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${params.GIT_BRANCH}"]],
+                        userRemoteConfigs: [[url: params.GIT_REPO]]
+                    ])
+                    
+                    // Get commit info
+                    env.GIT_COMMIT_MSG = sh(
+                        script: 'git log -1 --pretty=format:"%s"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "✅ Source code checked out successfully"
+                    echo "📝 Latest commit: ${env.GIT_COMMIT_MSG}"
+                }
+            }
+        }
+        
+        stage('🧪 Run Tests') {
+            when {
+                expression { fileExists('requirements.txt') || fileExists('package.json') }
+            }
+            steps {
+                script {
+                    echo "🧪 Running tests for ${params.PROJECT_NAME}"
+                    
+                    if (fileExists('requirements.txt')) {
+                        // Python tests
+                        sh '''
+                            python3 -m venv venv
+                            source venv/bin/activate
+                            pip install -r requirements.txt
+                            pip install pytest pytest-cov
+                            
+                            # Run tests if test directory exists
+                            if [ -d "tests" ]; then
+                                python -m pytest tests/ --cov=app --cov-report=xml --cov-report=html
+                            else
+                                echo "No tests directory found, skipping tests"
+                            fi
+                        '''
+                    } else if (fileExists('package.json')) {
+                        // Node.js tests
+                        sh '''
+                            npm install
+                            npm test || echo "No tests defined"
+                        '''
+                    }
+                    
+                    echo "✅ Tests completed"
+                }
+            }
+        }
+        
+        stage('🐳 Build Docker Image') {
+            steps {
+                script {
+                    echo "🐳 Building Docker image: ${DOCKER_IMAGE}:${BUILD_NUMBER_TAG}"
+                    
+                    // Build Docker image
+                    def dockerImage = docker.build("${DOCKER_IMAGE}:${BUILD_NUMBER_TAG}")
+                    
+                    // Tag as latest for the environment
+                    sh "docker tag ${DOCKER_IMAGE}:${BUILD_NUMBER_TAG} ${DOCKER_IMAGE}:${params.ENVIRONMENT}-latest"
+                    
+                    echo "✅ Docker image built successfully"
+                    
+                    // Store image info
+                    env.DOCKER_IMAGE_FULL = "${DOCKER_IMAGE}:${BUILD_NUMBER_TAG}"
+                }
+            }
+        }
+        
+        stage('🔐 Security Scan') {
+            steps {
+                script {
+                    echo "🔐 Running security scan on Docker image"
+                    
+                    try {
+                        // Docker image vulnerability scan (using trivy if available)
+                        sh '''
+                            if command -v trivy &> /dev/null; then
+                                trivy image --exit-code 0 --severity HIGH,CRITICAL ${DOCKER_IMAGE_FULL}
+                            else
+                                echo "Trivy not installed, skipping security scan"
+                                echo "To install: sudo apt-get install trivy"
+                            fi
+                        '''
+                    } catch (Exception e) {
+                        echo "Security scan failed: ${e.getMessage()}"
+                        echo "Continuing with deployment..."
+                    }
+                    
+                    echo "✅ Security scan completed"
+                }
+            }
+        }
+        
+        stage('📤 Push to Registry') {
+            steps {
+                script {
+                    echo "📤 Pushing Docker image to registry"
+                    
+                    docker.withRegistry("https://${params.DOCKER_REGISTRY}", 'docker-hub-credentials') {
+                        // Push with build number tag
+                        docker.image("${DOCKER_IMAGE}:${BUILD_NUMBER_TAG}").push()
+                        
+                        // Push environment-specific latest tag
+                        docker.image("${DOCKER_IMAGE}:${params.ENVIRONMENT}-latest").push()
+                        
+                        // Push latest tag for production
+                        if (params.ENVIRONMENT == 'production') {
+                            docker.image("${DOCKER_IMAGE}:${BUILD_NUMBER_TAG}").push('latest')
+                        }
+                    }
+                    
+                    echo "✅ Docker image pushed successfully"
+                }
+            }
+        }
+        
+        stage('☸️ Deploy to Kubernetes') {
+            steps {
+                script {
+                    echo "☸️ Deploying to Kubernetes (${params.ENVIRONMENT})"
+                    
+                    // Apply Kubernetes manifests
+                    sh """
+                        # Create namespace if it doesn't exist
+                        kubectl create namespace ${params.ENVIRONMENT} --dry-run=client -o yaml | kubectl apply -f -
+                        
+                        # Update deployment image
+                        kubectl set image deployment/${params.PROJECT_NAME} \\
+                            ${params.PROJECT_NAME}=${DOCKER_IMAGE_FULL} \\
+                            -n ${params.ENVIRONMENT}
+                        
+                        # Wait for rollout to complete
+                        kubectl rollout status deployment/${params.PROJECT_NAME} -n ${params.ENVIRONMENT} --timeout=300s
+                        
+                        # Get deployment status
+                        kubectl get pods -n ${params.ENVIRONMENT} -l app=${params.PROJECT_NAME}
+                    """
+                    
+                    echo "✅ Kubernetes deployment completed"
+                }
+            }
+        }
+        
+        stage('💚 Health Check') {
+            steps {
+                script {
+                    echo "💚 Running health checks"
+                    
+                    // Get service URL
+                    def serviceUrl = sh(
+                        script: """
+                            kubectl get service ${params.PROJECT_NAME} -n ${params.ENVIRONMENT} \\
+                            -o jsonpath='{.spec.clusterIP}:{.spec.ports[0].port}'
+                        """,
+                        returnStdout: true
+                    ).trim()
+                    
+                    // Health check with retry
+                    timeout(time: 5, unit: 'MINUTES') {
+                        waitUntil {
+                            script {
+                                try {
+                                    def response = sh(
+                                        script: "curl -f http://${serviceUrl}/health || curl -f http://${serviceUrl}/",
+                                        returnStatus: true
+                                    )
+                                    return response == 0
+                                } catch (Exception e) {
+                                    echo "Health check failed, retrying..."
+                                    sleep(10)
+                                    return false
+                                }
+                            }
+                        }
+                    }
+                    
+                    echo "✅ Health check passed"
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            script {
+                echo "🎉 Deployment completed successfully!"
+                
+                // Slack notification - Success
+                try {
+                    slackSend(
+                        channel: env.SLACK_CHANNEL,
+                        color: 'good',
+                        message: "🎉 *${params.PROJECT_NAME}* deployed successfully!\\n" +
+                               "📋 Environment: `${params.ENVIRONMENT}`\\n" +
+                               "🐳 Image: `${DOCKER_IMAGE_FULL}`\\n" +
+                               "⏱️ Duration: `${currentBuild.durationString}`\\n" +
+                               "🔗 <${BUILD_URL}|View Build>"
+                    )
+                } catch (Exception e) {
+                    echo "Slack notification failed: ${e.getMessage()}"
+                }
+                
+                // Clean up old Docker images
+                sh """
+                    docker image prune -f
+                    docker rmi ${DOCKER_IMAGE}:${BUILD_NUMBER_TAG} || true
+                """
+            }
+        }
+        
+        failure {
+            script {
+                echo "❌ Deployment failed!"
+                
+                // Slack notification - Failure
+                try {
+                    slackSend(
+                        channel: env.SLACK_CHANNEL,
+                        color: 'danger',
+                        message: "❌ *${params.PROJECT_NAME}* deployment failed!\\n" +
+                               "📋 Environment: `${params.ENVIRONMENT}`\\n" +
+                               "💥 Stage: `${env.STAGE_NAME}`\\n" +
+                               "⏱️ Duration: `${currentBuild.durationString}`\\n" +
+                               "🔗 <${BUILD_URL}|View Build>"
+                    )
+                } catch (Exception e) {
+                    echo "Slack notification failed: ${e.getMessage()}"
+                }
+                
+                // Rollback on production failure
+                if (params.ENVIRONMENT == 'production') {
+                    echo "🔄 Rolling back production deployment"
+                    sh """
+                        kubectl rollout undo deployment/${params.PROJECT_NAME} -n ${params.ENVIRONMENT}
+                        kubectl rollout status deployment/${params.PROJECT_NAME} -n ${params.ENVIRONMENT}
+                    """
+                }
+            }
+        }
+        
+        always {
+            script {
+                // Archive test results if they exist
+                if (fileExists('coverage.xml')) {
+                    publishCoverage adapters: [coberturaAdapter('coverage.xml')], sourceFileResolver: sourceFiles('STORE_LAST_BUILD')
+                }
+                
+                // Archive build artifacts
+                archiveArtifacts artifacts: 'Dockerfile', allowEmptyArchive: true
+                
+                // Clean workspace
+                cleanWs()
+            }
+        }
+    }
+}

@@ -1,0 +1,137 @@
+# Jenkins Configuration as Code (JCasC)
+# Jenkins 서버 설정을 코드로 관리
+
+jenkins:
+  systemMessage: "Fashion Recommendation API CI/CD Server"
+  
+  # 보안 설정
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+          
+  authorizationStrategy:
+    globalMatrix:
+      permissions:
+        - "Overall/Administer:admin"
+        - "Overall/Read:authenticated"
+        
+  # 글로벌 도구 설정
+  globalNodeProperties:
+    - envVars:
+        env:
+          - key: "DOCKER_REGISTRY"
+            value: "docker.io"
+          - key: "K8S_NAMESPACE_DEV"
+            value: "development"
+          - key: "K8S_NAMESPACE_STAGING"
+            value: "staging"
+          - key: "K8S_NAMESPACE_PROD"
+            value: "production"
+
+# Credentials 설정
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              scope: GLOBAL
+              id: "docker-hub-credentials"
+              username: "${DOCKER_HUB_USERNAME}"
+              password: "${DOCKER_HUB_PASSWORD}"
+              description: "Docker Hub Credentials"
+              
+          - string:
+              scope: GLOBAL
+              id: "slack-webhook-url"
+              secret: "${SLACK_WEBHOOK_URL}"
+              description: "Slack Webhook URL"
+              
+          - file:
+              scope: GLOBAL
+              id: "kubeconfig"
+              fileName: "config"
+              secretBytes: "${KUBECONFIG_BASE64}"
+              description: "Kubernetes Config File"
+
+# Tool 설정
+tool:
+  git:
+    installations:
+      - name: "Default Git"
+        home: "git"
+        
+  dockerTool:
+    installations:
+      - name: "docker"
+        home: "/usr/bin/docker"
+
+# Jobs 설정
+jobs:
+  - script: |
+      pipelineJob('fashion-api-deploy') {
+        description('Fashion Recommendation API Deployment Pipeline')
+        
+        parameters {
+          stringParam('PROJECT_NAME', 'fashion-recommendation-api', 'Project name to deploy')
+          stringParam('GIT_REPO', 'https://github.com/hyeminkim11230/fashion-recommendation-api.git', 'Git repository URL')
+          choiceParam('ENVIRONMENT', ['development', 'staging', 'production'], 'Target environment')
+        }
+        
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('https://github.com/hyeminkim11230/jenkins-setting.git')
+                }
+                branch('*/main')
+              }
+            }
+            scriptPath('pipelines/Jenkinsfile')
+          }
+        }
+        
+        triggers {
+          githubPush()
+        }
+      }
+      
+  - script: |
+      pipelineJob('fashion-api-rollback') {
+        description('Fashion Recommendation API Rollback Pipeline')
+        
+        parameters {
+          stringParam('PROJECT_NAME', 'fashion-recommendation-api', 'Project name')
+          choiceParam('ENVIRONMENT', ['development', 'staging', 'production'], 'Target environment')
+        }
+        
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('https://github.com/hyeminkim11230/jenkins-setting.git')
+                }
+                branch('*/main')
+              }
+            }
+            scriptPath('pipelines/Jenkinsfile.rollback')
+          }
+        }
+      }
+
+# 플러그인 설정
+unclassified:
+  slackNotifier:
+    baseUrl: "${SLACK_BASE_URL}"
+    teamDomain: "${SLACK_TEAM_DOMAIN}"
+    token: "${SLACK_TOKEN}"
+    
+  githubpluginconfig:
+    configs:
+      - name: "GitHub"
+        apiUrl: "https://api.github.com"
+        credentialsId: "github-token"

@@ -1,0 +1,128 @@
+# Jenkins Docker Compose 설정
+# Jenkins를 Docker로 실행하기 위한 설정
+
+version: '3.8'
+
+services:
+  jenkins:
+    image: jenkins/jenkins:lts
+    container_name: jenkins-server
+    restart: unless-stopped
+    
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+      
+    volumes:
+      # Jenkins 데이터 영구 저장
+      - jenkins_home:/var/jenkins_home
+      
+      # Docker 소켓 마운트 (Docker in Docker)
+      - /var/run/docker.sock:/var/run/docker.sock
+      
+      # Kubernetes 설정
+      - ~/.kube:/var/jenkins_home/.kube:ro
+      
+      # Jenkins 설정 파일들
+      - ./configs/jenkins.yaml:/var/jenkins_home/casc_configs/jenkins.yaml:ro
+      - ./plugins.txt:/usr/share/jenkins/ref/plugins.txt:ro
+      
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+      - CASC_JENKINS_CONFIG=/var/jenkins_home/casc_configs/jenkins.yaml
+      - JENKINS_ADMIN_PASSWORD=${JENKINS_ADMIN_PASSWORD:-admin123}
+      - DOCKER_HUB_USERNAME=${DOCKER_HUB_USERNAME}
+      - DOCKER_HUB_PASSWORD=${DOCKER_HUB_PASSWORD}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - SLACK_BASE_URL=${SLACK_BASE_URL}
+      - SLACK_TEAM_DOMAIN=${SLACK_TEAM_DOMAIN}
+      - SLACK_TOKEN=${SLACK_TOKEN}
+      - KUBECONFIG_BASE64=${KUBECONFIG_BASE64}
+      
+    networks:
+      - jenkins-network
+      
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Jenkins Agent (선택사항)
+  jenkins-agent:
+    image: jenkins/inbound-agent:latest
+    container_name: jenkins-agent
+    restart: unless-stopped
+    
+    environment:
+      - JENKINS_URL=http://jenkins:8080
+      - JENKINS_SECRET=${JENKINS_AGENT_SECRET}
+      - JENKINS_AGENT_NAME=docker-agent
+      
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      
+    networks:
+      - jenkins-network
+      
+    depends_on:
+      jenkins:
+        condition: service_healthy
+
+  # Prometheus (모니터링)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: jenkins-prometheus
+    restart: unless-stopped
+    
+    ports:
+      - "9090:9090"
+      
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+      
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      
+    networks:
+      - jenkins-network
+
+  # Grafana (대시보드)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: jenkins-grafana
+    restart: unless-stopped
+    
+    ports:
+      - "3000:3000"
+      
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin123}
+      
+    networks:
+      - jenkins-network
+      
+    depends_on:
+      - prometheus
+
+volumes:
+  jenkins_home:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  jenkins-network:
+    driver: bridge

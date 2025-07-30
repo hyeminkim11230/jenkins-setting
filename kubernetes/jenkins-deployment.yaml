@@ -1,0 +1,195 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-ci-config
+  namespace: jenkins
+data:
+  # Fashion API 프로젝트 설정
+  fashion-api.properties: |
+    PROJECT_NAME=fashion-recommendation-api
+    GIT_REPO=https://github.com/hyeminkim11230/fashion-recommendation-api.git
+    DOCKER_IMAGE=hyeminkim11230/fashion-recommendation-api
+    
+    # 환경별 설정
+    DEV_NAMESPACE=development
+    STAGING_NAMESPACE=staging
+    PROD_NAMESPACE=production
+    
+    # 리소스 설정
+    DEV_REPLICAS=1
+    STAGING_REPLICAS=2
+    PROD_REPLICAS=3
+    
+    # 헬스체크 설정
+    HEALTH_CHECK_PATH=/health
+    HEALTH_CHECK_TIMEOUT=300
+    
+  # Jenkins 환경 변수
+  jenkins.env: |
+    JENKINS_OPTS=--httpPort=8080
+    JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Xmx2g
+    
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubectl-config
+  namespace: jenkins
+data:
+  config: |
+    # Kubernetes 클러스터 설정이 여기에 들어갑니다
+    # Jenkins Pod에서 kubectl 명령어 사용을 위한 설정
+    
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jenkins-server
+  namespace: jenkins
+  labels:
+    app: jenkins
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jenkins
+  template:
+    metadata:
+      labels:
+        app: jenkins
+    spec:
+      serviceAccountName: jenkins
+      containers:
+      - name: jenkins
+        image: jenkins/jenkins:lts
+        ports:
+        - containerPort: 8080
+        - containerPort: 50000
+        
+        env:
+        - name: JAVA_OPTS
+          value: "-Djenkins.install.runSetupWizard=false -Xmx2g"
+        - name: JENKINS_OPTS
+          value: "--httpPort=8080"
+          
+        volumeMounts:
+        - name: jenkins-home
+          mountPath: /var/jenkins_home
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+        - name: kubectl-config
+          mountPath: /var/jenkins_home/.kube
+          readOnly: true
+        - name: jenkins-config
+          mountPath: /var/jenkins_home/casc_configs
+          readOnly: true
+          
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+            
+        livenessProbe:
+          httpGet:
+            path: /login
+            port: 8080
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          timeoutSeconds: 10
+          
+        readinessProbe:
+          httpGet:
+            path: /login
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 10
+          
+      volumes:
+      - name: jenkins-home
+        persistentVolumeClaim:
+          claimName: jenkins-pvc
+      - name: docker-sock
+        hostPath:
+          path: /var/run/docker.sock
+      - name: kubectl-config
+        configMap:
+          name: kubectl-config
+      - name: jenkins-config
+        configMap:
+          name: jenkins-ci-config
+          
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jenkins-service
+  namespace: jenkins
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    nodePort: 30080
+  - name: jnlp
+    port: 50000
+    targetPort: 50000
+  selector:
+    app: jenkins
+    
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jenkins-pvc
+  namespace: jenkins
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+      
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins
+  namespace: jenkins
+  
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: jenkins
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints", "persistentvolumeclaims", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["extensions"]
+  resources: ["deployments", "ingresses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: jenkins
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: jenkins
+subjects:
+- kind: ServiceAccount
+  name: jenkins
+  namespace: jenkins

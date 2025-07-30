@@ -1,0 +1,64 @@
+# Jenkins 필수 플러그인 목록
+# Configuration as Code에서 자동 설치될 플러그인들
+
+# 기본 필수 플러그인
+ant:latest
+antisamy-markup-formatter:latest
+authorize-project:latest
+build-timeout:latest
+credentials-binding:latest
+email-ext:latest
+gradle:latest
+ldap:latest
+mailer:latest
+matrix-auth:latest
+pam-auth:latest
+pipeline-github-lib:latest
+pipeline-stage-view:latest
+ssh-slaves:latest
+timestamper:latest
+workflow-aggregator:latest
+ws-cleanup:latest
+
+# Git 관련
+git:latest
+github:latest
+github-branch-source:latest
+github-pullrequest:latest
+
+# Docker 관련
+docker-workflow:latest
+docker-commons:latest
+docker-plugin:latest
+
+# Kubernetes 관련
+kubernetes:latest
+kubernetes-cli:latest
+
+# Pipeline 관련
+pipeline-build-step:latest
+pipeline-input-step:latest
+pipeline-milestone-step:latest
+pipeline-npm:latest
+pipeline-rest-api:latest
+pipeline-stage-step:latest
+
+# 알림 관련
+slack:latest
+email-ext:latest
+
+# 보안 관련
+role-strategy:latest
+matrix-auth:latest
+
+# 모니터링 관련
+prometheus:latest
+monitoring:latest
+
+# 유틸리티
+blueocean:latest
+configuration-as-code:latest
+job-dsl:latest
+build-name-setter:latest
+build-user-vars-plugin:latest
+environment-injector:latest

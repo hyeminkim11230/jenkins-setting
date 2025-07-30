@@ -1,0 +1,83 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'PROJECT_NAME', defaultValue: 'fashion-recommendation-api', description: 'Project name')
+        choice(name: 'ENVIRONMENT', choices: ['development', 'staging', 'production'], description: 'Target environment')
+    }
+    
+    stages {
+        stage('🔄 Rollback') {
+            steps {
+                script {
+                    echo "🔄 Rolling back ${params.PROJECT_NAME} in ${params.ENVIRONMENT}"
+                    
+                    sh """
+                        # Rollback to previous revision
+                        kubectl rollout undo deployment/${params.PROJECT_NAME} -n ${params.ENVIRONMENT}
+                        
+                        # Wait for rollback to complete
+                        kubectl rollout status deployment/${params.PROJECT_NAME} -n ${params.ENVIRONMENT}
+                        
+                        # Verify rollback
+                        kubectl get pods -n ${params.ENVIRONMENT} -l app=${params.PROJECT_NAME}
+                    """
+                    
+                    echo "✅ Rollback completed"
+                }
+            }
+        }
+        
+        stage('💚 Health Check') {
+            steps {
+                script {
+                    echo "💚 Verifying rollback health"
+                    
+                    def serviceUrl = sh(
+                        script: """
+                            kubectl get service ${params.PROJECT_NAME} -n ${params.ENVIRONMENT} \\
+                            -o jsonpath='{.spec.clusterIP}:{.spec.ports[0].port}'
+                        """,
+                        returnStdout: true
+                    ).trim()
+                    
+                    timeout(time: 3, unit: 'MINUTES') {
+                        waitUntil {
+                            script {
+                                try {
+                                    def response = sh(
+                                        script: "curl -f http://${serviceUrl}/health || curl -f http://${serviceUrl}/",
+                                        returnStatus: true
+                                    )
+                                    return response == 0
+                                } catch (Exception e) {
+                                    sleep(10)
+                                    return false
+                                }
+                            }
+                        }
+                    }
+                    
+                    echo "✅ Rollback health check passed"
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            slackSend(
+                channel: '#deployments',
+                color: 'warning',
+                message: "🔄 *${params.PROJECT_NAME}* rolled back successfully in `${params.ENVIRONMENT}`"
+            )
+        }
+        failure {
+            slackSend(
+                channel: '#deployments',
+                color: 'danger',
+                message: "❌ *${params.PROJECT_NAME}* rollback failed in `${params.ENVIRONMENT}`"
+            )
+        }
+    }
+}
