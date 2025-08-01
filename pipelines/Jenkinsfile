@@ -18,10 +18,6 @@ pipeline {
         GIT_COMMIT_SHORT = "${GIT_COMMIT.take(7)}"
     }
     
-    tools {
-        dockerTool 'docker'
-    }
-    
     stages {
         stage('🏁 Initialize') {
             steps {
